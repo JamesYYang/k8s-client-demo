@@ -8,3 +8,6 @@ research k8s client
 ## Reference
 
 - [Kubernetes Controller 机制详解 1](https://www.zhaohuabing.com/post/2023-03-09-how-to-create-a-k8s-controller/)
+- [Dynamic Client Sample](https://zhuanlan.zhihu.com/p/165970638)
+- [Official Client Go Sample](https://github.com/kubernetes/client-go/blob/master/examples/README.md)
+- [Official CRD Sample](https://github.com/kubernetes/apiextensions-apiserver/tree/master/examples/client-go)
