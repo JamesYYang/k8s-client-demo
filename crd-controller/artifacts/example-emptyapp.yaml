@@ -1,0 +1,10 @@
+apiVersion: crd.newegg.org/v1alpha1
+kind: EmptyApp
+metadata:
+  name: example-empty
+  namespace: bts-common
+  labels:
+    app: emptyapp-sample
+spec:
+  imageName: dev-harbor.newegg.org/bts/empty-server:1.0.3
+  replicas: 2

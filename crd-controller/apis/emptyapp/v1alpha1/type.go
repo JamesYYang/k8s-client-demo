@@ -17,7 +17,7 @@ type EmptyApp struct {
 
 type EmptyAppSpec struct {
 	ImageName string `json:"imageName"`
-	Replicas  *int32 `json:"replicas"`
+	Replicas  int32  `json:"replicas"`
 }
 
 type EmptyAppStatus struct {
