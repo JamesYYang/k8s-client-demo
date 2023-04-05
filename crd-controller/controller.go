@@ -58,27 +58,37 @@ func NewController(
 	}
 
 	emptyAppHandler := cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			key, err := cache.MetaNamespaceKeyFunc(obj)
-			if err == nil {
-				controller.queue.Add(key)
-			}
-		},
+		AddFunc: controller.enqueueEmptyApp,
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			key, err := cache.MetaNamespaceKeyFunc(newObj)
-			if err == nil {
-				controller.queue.Add(key)
-			}
+			controller.enqueueEmptyApp(newObj)
 		},
 		DeleteFunc: func(obj interface{}) {
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			if err == nil {
-				controller.queue.Add(key)
-			}
+			fmt.Println("delete empty app")
 		},
 	}
 
 	emptyInformer.Informer().AddEventHandler(emptyAppHandler)
+
+	// Set up an event handler for when Deployment resources change. This
+	// handler will lookup the owner of the given Deployment, and if it is
+	// owned by a Foo resource then the handler will enqueue that Foo resource for
+	// processing. This way, we don't need to implement custom logic for
+	// handling Deployment resources. More info on this pattern:
+	// https://github.com/kubernetes/community/blob/8cafef897a22026d42f5e5bb3f104febe7e29830/contributors/devel/controllers.md
+	deploymentInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: controller.handleObject,
+		UpdateFunc: func(old, new interface{}) {
+			newDepl := new.(*appsv1.Deployment)
+			oldDepl := old.(*appsv1.Deployment)
+			if newDepl.ResourceVersion == oldDepl.ResourceVersion {
+				// Periodic resync will send update events for all known Deployments.
+				// Two different versions of the same Deployment will always have different RVs.
+				return
+			}
+			controller.handleObject(new)
+		},
+		DeleteFunc: controller.handleObject,
+	})
 
 	return controller
 }
@@ -122,7 +132,7 @@ func (c *Controller) processNextItem() bool {
 
 	// Invoke the method containing the business logic
 	k := key.(string)
-	fmt.Printf("handler deployment: %s\n", k)
+	klog.Infof("handler empty app: %s\n", k)
 	err := c.procesResource(k)
 	// Handle the error if something went wrong during the execution of the business logic
 	c.handleErr(err, key)
@@ -164,6 +174,7 @@ func (c *Controller) procesResource(key string) error {
 	// If the resource doesn't exist, we'll create it
 	if errors.IsNotFound(err) {
 
+		klog.Infof("create deployment for empty app: %s\n", app.Name)
 		deployment, err = c.kubeclientset.AppsV1().Deployments(app.Namespace).
 			Create(context.TODO(), newDeployment(app, deploymentName), metav1.CreateOptions{})
 	}
@@ -180,6 +191,7 @@ func (c *Controller) procesResource(key string) error {
 	// should update the Deployment resource.
 	if (app.Spec.Replicas != 0 && app.Spec.Replicas != *deployment.Spec.Replicas) ||
 		(app.Spec.ImageName != deployment.Spec.Template.Spec.Containers[0].Image) {
+		klog.Infof("spec changed for empty app: %s\n", app.Name)
 		deployment, err = c.kubeclientset.AppsV1().Deployments(app.Namespace).
 			Update(context.TODO(), newDeployment(app, deploymentName), metav1.UpdateOptions{})
 	}
@@ -198,10 +210,6 @@ func (c *Controller) procesResource(key string) error {
 		return err
 	}
 
-	// Note that you also have to check the uid if you have a local controlled resource, which
-	// is dependent on the actual instance, to detect that a Pod was recreated with the same name
-	fmt.Printf("Sync/Add/Update for EmptyApp %s, Replicas: %d\n", app.GetName(), app.Spec.Replicas)
-
 	return nil
 }
 
@@ -217,6 +225,9 @@ func (c *Controller) updateEmptyAppStatus(app *emptyappv1alpha1.EmptyApp, deploy
 	// which is ideal for ensuring nothing other than resource status has been updated.
 	_, err := c.emptyclientset.CrdV1alpha1().EmptyApps(app.Namespace).
 		UpdateStatus(context.TODO(), appCopy, metav1.UpdateOptions{})
+
+	klog.Infof("update empty app: %s status in namespace: %s with available replicas: %d\n",
+		app.Name, app.Namespace, appCopy.Status.AvailableReplicas)
 	return err
 }
 
@@ -231,7 +242,7 @@ func (c *Controller) handleErr(err error, key interface{}) {
 
 	// This controller retries 5 times if something goes wrong. After that, it stops trying.
 	if c.queue.NumRequeues(key) < 5 {
-		klog.Infof("Error syncing deployment %v: %v", key, err)
+		klog.Infof("Error syncing empty app %v: %v", key, err)
 
 		// Re-enqueue the key rate limited. Based on the rate limiter on the
 		// queue and the re-enqueue history, the key will be processed later again.
@@ -242,7 +253,58 @@ func (c *Controller) handleErr(err error, key interface{}) {
 	c.queue.Forget(key)
 	// Report to an external entity that, even after several retries, we could not successfully process this key
 	runtime.HandleError(err)
-	klog.Infof("Dropping deployment %q out of the queue: %v", key, err)
+	klog.Infof("Dropping empty app %q out of the queue: %v", key, err)
+}
+
+// enqueueEmptyApp takes a EmptyApp resource and converts it into a namespace/name
+// string which is then put onto the work queue. This method should *not* be
+// passed resources of any type other than EmptyApp.
+func (c *Controller) enqueueEmptyApp(obj interface{}) {
+	var key string
+	var err error
+	if key, err = cache.MetaNamespaceKeyFunc(obj); err != nil {
+		runtime.HandleError(err)
+		return
+	}
+	c.queue.Add(key)
+}
+
+// handleObject will take any resource implementing metav1.Object and attempt
+// to find the EmptyApp resource that 'owns' it. It does this by looking at the
+// objects metadata.ownerReferences field for an appropriate OwnerReference.
+// It then enqueues that EmptyApp resource to be processed. If the object does not
+// have an appropriate OwnerReference, it will simply be skipped.
+func (c *Controller) handleObject(obj interface{}) {
+	klog.Infoln("deployment changed for empty app")
+	var object metav1.Object
+	var ok bool
+	if object, ok = obj.(metav1.Object); !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			runtime.HandleError(fmt.Errorf("error decoding object, invalid type"))
+			return
+		}
+		object, ok = tombstone.Obj.(metav1.Object)
+		if !ok {
+			runtime.HandleError(fmt.Errorf("error decoding object tombstone, invalid type"))
+			return
+		}
+	}
+	if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
+		// If this object is not owned by a Foo, we should not do anything more
+		// with it.
+		if ownerRef.Kind != "EmptyApp" {
+			return
+		}
+
+		app, err := c.emptyLister.EmptyApps(object.GetNamespace()).Get(ownerRef.Name)
+		if err != nil {
+			return
+		}
+
+		c.enqueueEmptyApp(app)
+		return
+	}
 }
 
 // newDeployment creates a new Deployment for a EmptyApp resource. It also sets

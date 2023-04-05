@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -66,5 +65,5 @@ func main() {
 	<-stopper
 	stop <- struct{}{}
 
-	log.Println("Received signal, exiting program..")
+	klog.Infoln("Received signal, exiting program..")
 }
