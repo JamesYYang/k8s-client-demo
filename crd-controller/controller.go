@@ -71,7 +71,7 @@ func NewController(
 
 	// Set up an event handler for when Deployment resources change. This
 	// handler will lookup the owner of the given Deployment, and if it is
-	// owned by a Foo resource then the handler will enqueue that Foo resource for
+	// owned by a EmptyApp resource then the handler will enqueue that EmptyApp resource for
 	// processing. This way, we don't need to implement custom logic for
 	// handling Deployment resources. More info on this pattern:
 	// https://github.com/kubernetes/community/blob/8cafef897a22026d42f5e5bb3f104febe7e29830/contributors/devel/controllers.md
@@ -149,7 +149,7 @@ func (c *Controller) procesResource(key string) error {
 		return nil
 	}
 
-	// Get the Foo resource with this namespace/name
+	// Get the EmptyApp resource with this namespace/name
 	app, err := c.emptyLister.EmptyApps(namespace).Get(name)
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -186,7 +186,7 @@ func (c *Controller) procesResource(key string) error {
 		return err
 	}
 
-	// If this number of the replicas on the Foo resource is specified, and the
+	// If this number of the replicas on the EmptyApp resource is specified, and the
 	// number does not equal the current desired replicas on the Deployment, we
 	// should update the Deployment resource.
 	if (app.Spec.Replicas != 0 && app.Spec.Replicas != *deployment.Spec.Replicas) ||
@@ -220,14 +220,14 @@ func (c *Controller) updateEmptyAppStatus(app *emptyappv1alpha1.EmptyApp, deploy
 	appCopy := app.DeepCopy()
 	appCopy.Status.AvailableReplicas = deployment.Status.AvailableReplicas
 	// If the CustomResourceSubresources feature gate is not enabled,
-	// we must use Update instead of UpdateStatus to update the Status block of the Foo resource.
+	// we must use Update instead of UpdateStatus to update the Status block of the EmptyApp resource.
 	// UpdateStatus will not allow changes to the Spec of the resource,
 	// which is ideal for ensuring nothing other than resource status has been updated.
 	_, err := c.emptyclientset.CrdV1alpha1().EmptyApps(app.Namespace).
 		UpdateStatus(context.TODO(), appCopy, metav1.UpdateOptions{})
 
 	klog.Infof("update empty app: %s status in namespace: %s with available replicas: %d\n",
-		app.Name, app.Namespace, appCopy.Status.AvailableReplicas)
+		appCopy.Name, appCopy.Namespace, appCopy.Status.AvailableReplicas)
 	return err
 }
 
@@ -275,7 +275,7 @@ func (c *Controller) enqueueEmptyApp(obj interface{}) {
 // It then enqueues that EmptyApp resource to be processed. If the object does not
 // have an appropriate OwnerReference, it will simply be skipped.
 func (c *Controller) handleObject(obj interface{}) {
-	klog.Infoln("deployment changed for empty app")
+
 	var object metav1.Object
 	var ok bool
 	if object, ok = obj.(metav1.Object); !ok {
@@ -291,11 +291,13 @@ func (c *Controller) handleObject(obj interface{}) {
 		}
 	}
 	if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
-		// If this object is not owned by a Foo, we should not do anything more
+		// If this object is not owned by a EmptyApp, we should not do anything more
 		// with it.
 		if ownerRef.Kind != "EmptyApp" {
 			return
 		}
+
+		klog.Infoln("deployment changed for empty app")
 
 		app, err := c.emptyLister.EmptyApps(object.GetNamespace()).Get(ownerRef.Name)
 		if err != nil {

@@ -82,7 +82,7 @@ func (c *Controller) procesResource(key string) error {
 		return nil
 	}
 
-	// Get the Foo resource with this namespace/name
+	// Get the Deployment resource with this namespace/name
 	deploy, err := c.lister.Deployments(namespace).Get(name)
 	if err != nil {
 		return err
