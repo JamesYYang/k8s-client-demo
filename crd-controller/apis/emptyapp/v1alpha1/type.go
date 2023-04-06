@@ -18,10 +18,12 @@ type EmptyApp struct {
 type EmptyAppSpec struct {
 	ImageName string `json:"imageName"`
 	Replicas  int32  `json:"replicas"`
+	SvcPort   int32  `json:"svcPort"`
 }
 
 type EmptyAppStatus struct {
-	AvailableReplicas int32 `json:"availableReplicas"`
+	AvailableReplicas int32  `json:"availableReplicas"`
+	ClusterIP         string `json:"clusterIP"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

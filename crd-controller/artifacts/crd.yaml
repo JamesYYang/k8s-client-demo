@@ -26,11 +26,15 @@ spec:
                   type: integer
                   minimum: 1
                   maximum: 10
+                svcPort:
+                  type: integer
             status:
               type: object
               properties:
                 availableReplicas:
                   type: integer
+                clusterIP:
+                  type: string
       subresources:
         # enables the status subresource
         status: {}

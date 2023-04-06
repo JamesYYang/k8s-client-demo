@@ -17,6 +17,9 @@ import (
 	appsinformers "k8s.io/client-go/informers/apps/v1"
 	appslisters "k8s.io/client-go/listers/apps/v1"
 
+	svcinformers "k8s.io/client-go/informers/core/v1"
+	svclisters "k8s.io/client-go/listers/core/v1"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -38,6 +41,9 @@ type Controller struct {
 	deploymentsLister appslisters.DeploymentLister
 	deploymentsSynced cache.InformerSynced
 
+	servicesLister svclisters.ServiceLister
+	servicesSynced cache.InformerSynced
+
 	queue workqueue.RateLimitingInterface
 	// recorder record.EventRecorder
 }
@@ -46,24 +52,37 @@ func NewController(
 	kubeclientset kubernetes.Interface,
 	sampleclientset clientset.Interface,
 	deploymentInformer appsinformers.DeploymentInformer,
+	serviceInformer svcinformers.ServiceInformer,
 	emptyInformer informers.EmptyAppInformer) *Controller {
 	controller := &Controller{
 		kubeclientset:     kubeclientset,
 		emptyclientset:    sampleclientset,
 		deploymentsLister: deploymentInformer.Lister(),
 		deploymentsSynced: deploymentInformer.Informer().HasSynced,
+		servicesLister:    serviceInformer.Lister(),
+		servicesSynced:    serviceInformer.Informer().HasSynced,
 		emptyLister:       emptyInformer.Lister(),
 		emptySynced:       emptyInformer.Informer().HasSynced,
 		queue:             workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
 	}
 
 	emptyAppHandler := cache.ResourceEventHandlerFuncs{
-		AddFunc: controller.enqueueEmptyApp,
+		AddFunc: func(obj interface{}) {
+			klog.Infoln("add empty app")
+			controller.enqueueEmptyApp(obj)
+		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
+			klog.Infoln("update empty app")
+			newApp := newObj.(*emptyappv1alpha1.EmptyApp)
+			oldApp := oldObj.(*emptyappv1alpha1.EmptyApp)
+			if newApp.ResourceVersion == oldApp.ResourceVersion {
+				klog.Infoln("emptyapp has same version")
+				return
+			}
 			controller.enqueueEmptyApp(newObj)
 		},
 		DeleteFunc: func(obj interface{}) {
-			fmt.Println("delete empty app")
+			klog.Infoln("delete empty app")
 		},
 	}
 
@@ -76,7 +95,9 @@ func NewController(
 	// handling Deployment resources. More info on this pattern:
 	// https://github.com/kubernetes/community/blob/8cafef897a22026d42f5e5bb3f104febe7e29830/contributors/devel/controllers.md
 	deploymentInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: controller.handleObject,
+		AddFunc: func(obj interface{}) {
+			controller.handleObject(obj)
+		},
 		UpdateFunc: func(old, new interface{}) {
 			newDepl := new.(*appsv1.Deployment)
 			oldDepl := old.(*appsv1.Deployment)
@@ -87,7 +108,28 @@ func NewController(
 			}
 			controller.handleObject(new)
 		},
-		DeleteFunc: controller.handleObject,
+		DeleteFunc: func(obj interface{}) {
+			controller.handleObject(obj)
+		},
+	})
+
+	serviceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			controller.handleObject(obj)
+		},
+		UpdateFunc: func(old, new interface{}) {
+			newDepl := new.(*corev1.Service)
+			oldDepl := old.(*corev1.Service)
+			if newDepl.ResourceVersion == oldDepl.ResourceVersion {
+				// Periodic resync will send update events for all known Deployments.
+				// Two different versions of the same Deployment will always have different RVs.
+				return
+			}
+			controller.handleObject(new)
+		},
+		DeleteFunc: func(obj interface{}) {
+			controller.handleObject(obj)
+		},
 	})
 
 	return controller
@@ -98,12 +140,10 @@ func (c *Controller) Run(workers int, stopCh chan struct{}) {
 
 	// Let the workers stop when we are done
 	defer c.queue.ShutDown()
-	klog.Info("Starting Deployment controller")
-
-	// go c.informer.Run(stopCh)
+	klog.Info("Starting EmptyApp controller")
 
 	// Wait for all involved caches to be synced, before processing items from the queue is started
-	if !cache.WaitForCacheSync(stopCh, c.deploymentsSynced, c.emptySynced) {
+	if !cache.WaitForCacheSync(stopCh, c.deploymentsSynced, c.servicesSynced, c.emptySynced) {
 		runtime.HandleError(fmt.Errorf("Timed out waiting for caches to sync"))
 		return
 	}
@@ -113,7 +153,7 @@ func (c *Controller) Run(workers int, stopCh chan struct{}) {
 	}
 
 	<-stopCh
-	klog.Info("Stopping Deployment controller")
+	klog.Info("Stopping EmptyApp controller")
 }
 
 func (c *Controller) runWorker() {
@@ -168,44 +208,19 @@ func (c *Controller) procesResource(key string) error {
 		return nil
 	}
 
-	deploymentName := fmt.Sprintf("%s-empty-deployment", app.Name)
-
-	deployment, err := c.deploymentsLister.Deployments(app.Namespace).Get(deploymentName)
-	// If the resource doesn't exist, we'll create it
-	if errors.IsNotFound(err) {
-
-		klog.Infof("create deployment for empty app: %s\n", app.Name)
-		deployment, err = c.kubeclientset.AppsV1().Deployments(app.Namespace).
-			Create(context.TODO(), newDeployment(app, deploymentName), metav1.CreateOptions{})
-	}
-
-	// If an error occurs during Get/Create, we'll requeue the item so we can
-	// attempt processing again later. This could have been caused by a
-	// temporary network failure, or any other transient reason.
+	deploy, err := c.ensureDeployment(app)
 	if err != nil {
 		return err
 	}
 
-	// If this number of the replicas on the EmptyApp resource is specified, and the
-	// number does not equal the current desired replicas on the Deployment, we
-	// should update the Deployment resource.
-	if (app.Spec.Replicas != 0 && app.Spec.Replicas != *deployment.Spec.Replicas) ||
-		(app.Spec.ImageName != deployment.Spec.Template.Spec.Containers[0].Image) {
-		klog.Infof("spec changed for empty app: %s\n", app.Name)
-		deployment, err = c.kubeclientset.AppsV1().Deployments(app.Namespace).
-			Update(context.TODO(), newDeployment(app, deploymentName), metav1.UpdateOptions{})
-	}
-
-	// If an error occurs during Update, we'll requeue the item so we can
-	// attempt processing again later. This could have been caused by a
-	// temporary network failure, or any other transient reason.
+	svc, err := c.ensureService(app)
 	if err != nil {
 		return err
 	}
 
 	// Finally, we update the status block of the EmptyApp resource to reflect the
 	// current state of the world
-	err = c.updateEmptyAppStatus(app, deployment)
+	err = c.updateEmptyAppStatus(app, deploy, svc)
 	if err != nil {
 		return err
 	}
@@ -213,12 +228,14 @@ func (c *Controller) procesResource(key string) error {
 	return nil
 }
 
-func (c *Controller) updateEmptyAppStatus(app *emptyappv1alpha1.EmptyApp, deployment *appsv1.Deployment) error {
+func (c *Controller) updateEmptyAppStatus(app *emptyappv1alpha1.EmptyApp,
+	deployment *appsv1.Deployment, svc *corev1.Service) error {
 	// NEVER modify objects from the store. It's a read-only, local cache.
 	// You can use DeepCopy() to make a deep copy of original object and modify this copy
 	// Or create a copy manually for better performance
 	appCopy := app.DeepCopy()
 	appCopy.Status.AvailableReplicas = deployment.Status.AvailableReplicas
+	appCopy.Status.ClusterIP = svc.Spec.ClusterIP
 	// If the CustomResourceSubresources feature gate is not enabled,
 	// we must use Update instead of UpdateStatus to update the Status block of the EmptyApp resource.
 	// UpdateStatus will not allow changes to the Spec of the resource,
@@ -306,43 +323,5 @@ func (c *Controller) handleObject(obj interface{}) {
 
 		c.enqueueEmptyApp(app)
 		return
-	}
-}
-
-// newDeployment creates a new Deployment for a EmptyApp resource. It also sets
-// the appropriate OwnerReferences on the resource so handleObject can discover
-// the EmptyApp resource that 'owns' it.
-func newDeployment(app *emptyappv1alpha1.EmptyApp, deploymentName string) *appsv1.Deployment {
-	labels := map[string]string{
-		"app":        "emptyapp",
-		"controller": app.Name,
-	}
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      deploymentName,
-			Namespace: app.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(app, emptyappv1alpha1.SchemeGroupVersion.WithKind("EmptyApp")),
-			},
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &app.Spec.Replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "empty-server",
-							Image: app.Spec.ImageName,
-						},
-					},
-				},
-			},
-		},
 	}
 }

@@ -51,6 +51,7 @@ func main() {
 
 	ctrl := NewController(kubeClient, client,
 		kubeInformerFactory.Apps().V1().Deployments(),
+		kubeInformerFactory.Core().V1().Services(),
 		factory.Crd().V1alpha1().EmptyApps())
 
 	stopper := make(chan os.Signal, 1)
